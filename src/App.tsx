@@ -1,4 +1,4 @@
-import axios, { AxiosError } from "axios";
+import axios, { AxiosError, AxiosResponse } from "axios";
 import React, { Component } from "react";
 
 const axiosGitHubGraphQL = axios.create({
@@ -55,11 +55,25 @@ class App extends Component<{}, AppState> {
   onFetchFromGitHub = () => {
     axiosGitHubGraphQL
       .post("", { query: GET_ORGANIZATION })
-      .then(result =>
-        this.setState(() => ({
-          organization: result.data.data.organization,
-          errors: result.data.errors
-        }))
+      .then(
+        (
+          result: AxiosResponse<{
+            data: { organization: IOrganization };
+            errors: IError[];
+          }>
+        ) => {
+          if (result.data.errors) {
+            this.setState(() => ({
+              organization: null,
+              errors: result.data.errors
+            }));
+          } else {
+            this.setState(() => ({
+              organization: result.data.data.organization,
+              errors: []
+            }));
+          }
+        }
       )
       .catch((err: AxiosError) => {
         this.setState(() => ({
@@ -86,7 +100,7 @@ class App extends Component<{}, AppState> {
           <button type="submit">Search</button>
         </form>
         <hr />
-        {organization ? (
+        {organization || errors.length ? (
           <Organization organization={organization} errors={errors} />
         ) : (
           <p>No information yet ...</p>
@@ -105,7 +119,7 @@ const Organization: React.FunctionComponent<OrganizationProps> = ({
   organization,
   errors
 }) => {
-  if (errors) {
+  if (errors.length) {
     return (
       <p>
         <strong>Something went wrong:</strong>
