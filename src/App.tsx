@@ -6,34 +6,136 @@ const axiosGitHubGraphQL = axios.create({
   headers: {
     Authorization: `bearer ${
       process.env.REACT_APP_GITHUB_PERSONAL_ACCESS_TOKEN
-    }`
+      }`
   }
 });
 
-const GET_ORGANIZATION = `
-{
-  organization(login: "the-road-to-learn-react") {
-    name
-    url
+const GET_ISSUES_OF_REPOSITORY = `
+  query ($organization: String!, $repository: String!, $cursor: String) {
+    organization(login: $organization) {
+      name
+      url
+      repository(name: $repository) {
+        name
+        url
+        issues(first: 5, after: $cursor, states: [OPEN]) {
+          totalCount
+          pageInfo {
+            endCursor
+            hasNextPage
+          }
+          edges {
+            node {
+              id
+              title
+              url
+              reactions(last: 3) {
+                edges {
+                  node {
+                    id
+                    content
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
-}
 `;
 
+const getIssuesOfRepository = (path: string, cursor?: string) => {
+  const [organization, repository] = path.split("/");
+  return axiosGitHubGraphQL.post("", {
+    query: GET_ISSUES_OF_REPOSITORY,
+    variables: { organization, repository, cursor }
+  });
+};
+
+const resolveIssuesQuery = (
+  queryResult: IQueryResult,
+  state: AppState,
+  cursor?: string
+) => {
+  console.log("@@@@@@@", cursor);
+  const { data, errors } = queryResult.data;
+  if (!cursor) {
+    return {
+      organization: data.organization,
+      errors
+    };
+  }
+  const { edges: oldIssues } = state.organization!.repository.issues;
+  const { edges: newIssues } = data.organization.repository.issues;
+  const updatedIssues = [...oldIssues, ...newIssues];
+  return {
+    organization: {
+      ...data.organization,
+      repository: {
+        ...data.organization.repository,
+        issues: {
+          ...data.organization.repository.issues,
+          edges: updatedIssues
+        }
+      }
+    },
+    errors
+  } as AppState;
+};
+
 const TITLE = "React GraphQL GitHub Client";
+
+type IPage<T> = {
+  readonly edges: [
+    {
+      readonly node: T;
+    }
+  ];
+  readonly totalConunt: number;
+  readonly pageInfo: {
+    readonly endCursor: string;
+    readonly hasNextPage: boolean;
+  };
+};
+
+type IReaction = {
+  readonly id: string;
+  readonly content: string;
+};
+
+type IIssue = {
+  readonly id: string;
+  readonly title: string;
+  readonly url: string;
+  readonly reactions: IPage<IReaction>;
+};
+
+type IRepository = {
+  readonly name: string;
+  readonly url: string;
+  readonly issues: IPage<IIssue>;
+};
 
 type IOrganization = {
   readonly name: string;
   readonly url: string;
-} | null;
+  readonly repository: IRepository;
+};
 
 type IError = {
   message: string;
 };
 
+type IQueryResult = AxiosResponse<{
+  data: { organization: IOrganization };
+  errors: IError[];
+}>;
+
 type AppState = {
-  readonly path: string;
-  readonly organization: IOrganization;
-  readonly errors: IError[];
+  readonly path?: string;
+  readonly organization?: IOrganization | null;
+  readonly errors?: IError[];
 };
 class App extends Component<{}, AppState> {
   state = {
@@ -42,39 +144,36 @@ class App extends Component<{}, AppState> {
     errors: []
   };
   componentDidMount() {
-    this.onFetchFromGitHub();
+    this.onFetchFromGitHub(this.state.path);
   }
   onChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     this.setState({ path: event.target.value });
   };
   onSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    // fetch data
+    this.onFetchFromGitHub(this.state.path);
     event.preventDefault();
   };
 
-  onFetchFromGitHub = () => {
-    axiosGitHubGraphQL
-      .post("", { query: GET_ORGANIZATION })
-      .then(
-        (
-          result: AxiosResponse<{
-            data: { organization: IOrganization };
-            errors: IError[];
-          }>
-        ) => {
-          if (result.data.errors) {
-            this.setState(() => ({
-              organization: null,
-              errors: result.data.errors
-            }));
-          } else {
-            this.setState(() => ({
-              organization: result.data.data.organization,
-              errors: []
-            }));
-          }
+  onFetchMoreIssues = () => {
+    if (this.state.organization) {
+      const { endCursor } = ((this.state
+        .organization as any) as IOrganization).repository.issues.pageInfo;
+      this.onFetchFromGitHub(this.state.path, endCursor);
+    }
+  };
+
+  onFetchFromGitHub = (path: string, cursor?: string) => {
+    getIssuesOfRepository(path, cursor)
+      .then((result: IQueryResult) => {
+        if (result.data.errors) {
+          this.setState(() => ({
+            organization: null,
+            errors: result.data.errors
+          }));
+        } else {
+          this.setState(resolveIssuesQuery(result, this.state, cursor));
         }
-      )
+      })
       .catch((err: AxiosError) => {
         this.setState(() => ({
           errors: [{ message: err.message }]
@@ -101,10 +200,14 @@ class App extends Component<{}, AppState> {
         </form>
         <hr />
         {organization || errors.length ? (
-          <Organization organization={organization} errors={errors} />
+          <Organization
+            organization={(organization as any) as IOrganization}
+            errors={errors}
+            onFetchMoreIssues={this.onFetchMoreIssues}
+          />
         ) : (
-          <p>No information yet ...</p>
-        )}
+            <p>No information yet ...</p>
+          )}
       </div>
     );
   }
@@ -113,13 +216,15 @@ class App extends Component<{}, AppState> {
 type OrganizationProps = {
   readonly organization: IOrganization;
   readonly errors: IError[];
+  readonly onFetchMoreIssues: () => void;
 };
 
 const Organization: React.FunctionComponent<OrganizationProps> = ({
   organization,
-  errors
+  errors,
+  onFetchMoreIssues
 }) => {
-  if (errors.length) {
+  if (errors && errors.length) {
     return (
       <p>
         <strong>Something went wrong:</strong>
@@ -133,8 +238,45 @@ const Organization: React.FunctionComponent<OrganizationProps> = ({
         <strong>Issues from Organization:</strong>
         <a href={organization!.url}>{organization!.name}</a>
       </p>
+      <Repository
+        repository={organization!.repository}
+        onFetchMoreIssues={onFetchMoreIssues}
+      />
     </div>
   );
 };
+
+type RepositoryProps = {
+  readonly repository: IRepository;
+  readonly onFetchMoreIssues: () => void;
+};
+
+const Repository: React.FunctionComponent<RepositoryProps> = ({
+  repository,
+  onFetchMoreIssues
+}) => (
+    <div>
+      <p>
+        <strong>In Repository:</strong>
+        <a href={repository.url}>{repository.name}</a>
+      </p>
+      <ul>
+        {repository.issues.edges.map(issue => (
+          <li key={issue.node.id}>
+            <a href={issue.node.url}>{issue.node.title}</a>
+            <ul>
+              {issue.node.reactions.edges.map(reaction => (
+                <li key={reaction.node.id}>{reaction.node.content}</li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+      <hr />
+      {repository.issues.pageInfo.hasNextPage && (
+        <button onClick={onFetchMoreIssues}>More</button>
+      )}
+    </div>
+  );
 
 export default App;
