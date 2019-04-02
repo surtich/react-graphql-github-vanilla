@@ -6,9 +6,19 @@ const axiosGitHubGraphQL = axios.create({
   headers: {
     Authorization: `bearer ${
       process.env.REACT_APP_GITHUB_PERSONAL_ACCESS_TOKEN
-      }`
+    }`
   }
 });
+
+const ADD_STAR = `
+  mutation ($repositoryId: ID!) {
+    addStar(input:{starrableId:$repositoryId}) {
+      starrable {
+        viewerHasStarred
+      }
+    }
+  }
+`;
 
 const GET_ISSUES_OF_REPOSITORY = `
   query ($organization: String!, $repository: String!, $cursor: String) {
@@ -16,8 +26,13 @@ const GET_ISSUES_OF_REPOSITORY = `
       name
       url
       repository(name: $repository) {
+        id
         name
         url
+        stargazers {
+          totalCount
+        }
+        viewerHasStarred
         issues(first: 5, after: $cursor, states: [OPEN]) {
           totalCount
           pageInfo {
@@ -53,12 +68,18 @@ const getIssuesOfRepository = (path: string, cursor?: string) => {
   });
 };
 
+const addStarToRepository = (repositoryId: string) => {
+  return axiosGitHubGraphQL.post("", {
+    query: ADD_STAR,
+    variables: { repositoryId }
+  });
+};
+
 const resolveIssuesQuery = (
   queryResult: IQueryResult,
   state: AppState,
   cursor?: string
 ) => {
-  console.log("@@@@@@@", cursor);
   const { data, errors } = queryResult.data;
   if (!cursor) {
     return {
@@ -84,7 +105,29 @@ const resolveIssuesQuery = (
   } as AppState;
 };
 
+const resolveAddStarMutation = (mutationResult: any) => (state: AppState) => {
+  const { viewerHasStarred } = mutationResult.data.data.addStar.starrable;
+
+  const { totalCount } = state.organization!.repository.stargazers;
+
+  return {
+    ...state,
+    organization: {
+      ...state.organization,
+      repository: {
+        ...state.organization!.repository,
+        viewerHasStarred,
+        stargazers: {
+          totalCount: totalCount + 1
+        }
+      }
+    }
+  } as AppState;
+};
+
 const TITLE = "React GraphQL GitHub Client";
+
+type StarRepository = (repositoryId: string, viewerHasStarred: boolean) => void;
 
 type IPage<T> = {
   readonly edges: [
@@ -112,8 +155,13 @@ type IIssue = {
 };
 
 type IRepository = {
+  readonly id: string;
   readonly name: string;
   readonly url: string;
+  readonly stargazers: {
+    totalCount: number;
+  };
+  readonly viewerHasStarred: boolean;
   readonly issues: IPage<IIssue>;
 };
 
@@ -162,6 +210,12 @@ class App extends Component<{}, AppState> {
     }
   };
 
+  onStarRepository: StarRepository = (repositoryId, viewerHasStarred) => {
+    addStarToRepository(repositoryId).then(mutationResult =>
+      this.setState(resolveAddStarMutation(mutationResult))
+    );
+  };
+
   onFetchFromGitHub = (path: string, cursor?: string) => {
     getIssuesOfRepository(path, cursor)
       .then((result: IQueryResult) => {
@@ -204,10 +258,11 @@ class App extends Component<{}, AppState> {
             organization={(organization as any) as IOrganization}
             errors={errors}
             onFetchMoreIssues={this.onFetchMoreIssues}
+            onStarRepository={this.onStarRepository}
           />
         ) : (
-            <p>No information yet ...</p>
-          )}
+          <p>No information yet ...</p>
+        )}
       </div>
     );
   }
@@ -217,12 +272,14 @@ type OrganizationProps = {
   readonly organization: IOrganization;
   readonly errors: IError[];
   readonly onFetchMoreIssues: () => void;
+  readonly onStarRepository: StarRepository;
 };
 
 const Organization: React.FunctionComponent<OrganizationProps> = ({
   organization,
   errors,
-  onFetchMoreIssues
+  onFetchMoreIssues,
+  onStarRepository
 }) => {
   if (errors && errors.length) {
     return (
@@ -241,6 +298,7 @@ const Organization: React.FunctionComponent<OrganizationProps> = ({
       <Repository
         repository={organization!.repository}
         onFetchMoreIssues={onFetchMoreIssues}
+        onStarRepository={onStarRepository}
       />
     </div>
   );
@@ -249,34 +307,45 @@ const Organization: React.FunctionComponent<OrganizationProps> = ({
 type RepositoryProps = {
   readonly repository: IRepository;
   readonly onFetchMoreIssues: () => void;
+  readonly onStarRepository: StarRepository;
 };
 
 const Repository: React.FunctionComponent<RepositoryProps> = ({
   repository,
-  onFetchMoreIssues
+  onFetchMoreIssues,
+  onStarRepository
 }) => (
-    <div>
-      <p>
-        <strong>In Repository:</strong>
-        <a href={repository.url}>{repository.name}</a>
-      </p>
-      <ul>
-        {repository.issues.edges.map(issue => (
-          <li key={issue.node.id}>
-            <a href={issue.node.url}>{issue.node.title}</a>
-            <ul>
-              {issue.node.reactions.edges.map(reaction => (
-                <li key={reaction.node.id}>{reaction.node.content}</li>
-              ))}
-            </ul>
-          </li>
-        ))}
-      </ul>
-      <hr />
-      {repository.issues.pageInfo.hasNextPage && (
-        <button onClick={onFetchMoreIssues}>More</button>
-      )}
-    </div>
-  );
+  <div>
+    <p>
+      <strong>In Repository:</strong>
+      <a href={repository.url}>{repository.name}</a>
+    </p>
+    <button
+      type="button"
+      onClick={() =>
+        onStarRepository(repository.id, repository.viewerHasStarred)
+      }
+    >
+      {repository.stargazers.totalCount}
+      {repository.viewerHasStarred ? " Unstar" : " Star"}
+    </button>
+    <ul>
+      {repository.issues.edges.map(issue => (
+        <li key={issue.node.id}>
+          <a href={issue.node.url}>{issue.node.title}</a>
+          <ul>
+            {issue.node.reactions.edges.map(reaction => (
+              <li key={reaction.node.id}>{reaction.node.content}</li>
+            ))}
+          </ul>
+        </li>
+      ))}
+    </ul>
+    <hr />
+    {repository.issues.pageInfo.hasNextPage && (
+      <button onClick={onFetchMoreIssues}>More</button>
+    )}
+  </div>
+);
 
 export default App;
